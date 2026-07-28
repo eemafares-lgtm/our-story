@@ -123,7 +123,9 @@
     position:absolute; top:4px; left:4px; background:rgba(20,4,10,.75); color:var(--gold-light);
     border:none; border-radius:50%; width:22px; height:22px; cursor:pointer; font-size:.85rem; line-height:1;
   }
+  .uploadStatus{ text-align:center; font-size:.82rem; color:var(--gold-light); margin-top:10px; }
   .setupActions{ display:flex; gap:10px; margin-top:6px; }
+  .btn:disabled{ opacity:.55; cursor:not-allowed; transform:none !important; box-shadow:none !important; }
 
   /* ---------- main screen ---------- */
   #mainScreen{ max-width:560px; }
@@ -263,6 +265,7 @@
           📷 دوس هنا وضيف صور
           <input type="file" id="photoInput" accept="image/*" multiple>
         </div>
+        <div class="uploadStatus hidden" id="uploadStatus"></div>
         <div class="thumbGrid" id="thumbGrid"></div>
       </div>
 
@@ -335,7 +338,7 @@
   }
 
   const STORAGE_KEY = 'love_data';
-  let appData = null;         // { config:{nameMe,nameHer,startDateTime,password,message}, photos:[dataURLs] }
+  let appData = null;         // { config:{nameMe,nameHer,startDateTime,password,message}, photos:[Cloudinary URLs] }
   let tempPhotos = [];        // used while in setup/edit screen
   let isEditMode = false;
   let counterInterval = null;
@@ -358,9 +361,12 @@
     }
   }
 
-  // ---------- image resize ----------
-  function resizeImage(file, maxDim, quality){
-    maxDim = maxDim || 900; quality = quality || 0.72;
+  // ---------- Cloudinary upload ----------
+  const CLOUDINARY_CLOUD_NAME = 'ybzcdiht';
+  const CLOUDINARY_UPLOAD_PRESET = 'ml_default';
+
+  function resizeImageToBlob(file, maxDim, quality){
+    maxDim = maxDim || 1280; quality = quality || 0.75;
     return new Promise((resolve, reject)=>{
       const reader = new FileReader();
       reader.onload = (e)=>{
@@ -373,7 +379,9 @@
           canvas.width = w; canvas.height = h;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, w, h);
-          resolve(canvas.toDataURL('image/jpeg', quality));
+          canvas.toBlob((blob)=>{
+            if(blob) resolve(blob); else reject(new Error('canvas toBlob failed'));
+          }, 'image/jpeg', quality);
         };
         img.onerror = reject;
         img.src = e.target.result;
@@ -383,22 +391,62 @@
     });
   }
 
+  async function uploadToCloudinary(blob){
+    const formData = new FormData();
+    formData.append('file', blob);
+    formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+    const res = await fetch('https://api.cloudinary.com/v1_1/' + CLOUDINARY_CLOUD_NAME + '/image/upload', {
+      method: 'POST',
+      body: formData
+    });
+    if(!res.ok){
+      throw new Error('Cloudinary upload failed with status ' + res.status);
+    }
+    const data = await res.json();
+    if(!data.secure_url){
+      throw new Error('Cloudinary response missing secure_url');
+    }
+    return data.secure_url;
+  }
+
   // ---------- setup screen logic ----------
   const photoPickerBtn = document.getElementById('photoPickerBtn');
   const photoInput = document.getElementById('photoInput');
   const thumbGrid = document.getElementById('thumbGrid');
 
-  photoPickerBtn.addEventListener('click', ()=> photoInput.click());
+  const uploadStatusEl = document.getElementById('uploadStatus');
+  let isUploading = false;
+
+  photoPickerBtn.addEventListener('click', ()=>{ if(!isUploading) photoInput.click(); });
   photoInput.addEventListener('change', async (e)=>{
     const files = Array.from(e.target.files || []);
-    for(const f of files){
-      try{
-        const dataUrl = await resizeImage(f);
-        tempPhotos.push(dataUrl);
-      }catch(err){ console.error(err); }
-    }
     photoInput.value = '';
-    renderThumbs();
+    if(files.length === 0) return;
+
+    const errEl = document.getElementById('setupErr');
+    const saveBtn = document.getElementById('saveSetupBtn');
+    errEl.textContent = '';
+    isUploading = true;
+    saveBtn.disabled = true;
+    uploadStatusEl.classList.remove('hidden');
+
+    for(let i=0; i<files.length; i++){
+      uploadStatusEl.textContent = 'بيرفع صورة ' + (i+1) + ' من ' + files.length + '... 📤';
+      try{
+        const blob = await resizeImageToBlob(files[i]);
+        const url = await uploadToCloudinary(blob);
+        tempPhotos.push(url);
+        renderThumbs();
+      }catch(err){
+        console.error(err);
+        errEl.textContent = 'حصل مشكلة في رفع إحدى الصور، جرب تاني.';
+      }
+    }
+
+    uploadStatusEl.classList.add('hidden');
+    uploadStatusEl.textContent = '';
+    saveBtn.disabled = false;
+    isUploading = false;
   });
   function renderThumbs(){
     thumbGrid.innerHTML = '';
@@ -452,6 +500,7 @@
   document.getElementById('saveSetupBtn').addEventListener('click', async ()=>{
     const errEl = document.getElementById('setupErr');
     errEl.textContent = '';
+    if(isUploading){ errEl.textContent = 'استني الصور تخلص رفع الأول.'; return; }
     const nameMe = document.getElementById('nameMe').value.trim();
     const nameHer = document.getElementById('nameHer').value.trim();
     const startDateTime = document.getElementById('startDateInput').value;
